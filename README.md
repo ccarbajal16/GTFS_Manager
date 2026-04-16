@@ -60,7 +60,13 @@ install.packages(c(
 
 > **Note:** `sf` requires system-level GDAL/GEOS libraries. On Windows, these are bundled automatically via the binary package. On Linux/macOS, install them with your system package manager before running `install.packages("sf")`.
 
-## Running the App
+## Live Demo
+
+The app is deployed and available on Posit Cloud:
+
+**[https://019d9740-d0ab-60cf-4767-e2ae67164bd9.share.connect.posit.cloud/](https://019d9740-d0ab-60cf-4767-e2ae67164bd9.share.connect.posit.cloud/)**
+
+## Running the App Locally
 
 ```r
 shiny::runApp("app.R")
