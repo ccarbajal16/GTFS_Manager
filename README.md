@@ -1,6 +1,6 @@
 # GTFS Manager
 
-A Shiny web application for analyzing, creating, and validating GTFS (General Transit Feed Specification) feeds. Developed for the **Curso-Taller GTFS – MTC**.
+A Shiny web application for analyzing, creating, and validating GTFS (General Transit Feed Specification) feeds. Developed for the **Curso-Taller GTFS**.
 
 ## Features
 
