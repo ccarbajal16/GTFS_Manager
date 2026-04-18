@@ -2,6 +2,8 @@
 
 A Shiny web application for analyzing, creating, and validating GTFS (General Transit Feed Specification) feeds. Developed for the **Curso-Taller GTFS**.
 
+![GTFS Manager](images/GTFS2.png)
+
 ## Features
 
 The app is organized into three main tabs:
