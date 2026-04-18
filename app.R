@@ -409,7 +409,7 @@ ui <- page_navbar(
 
   nav_spacer(),
   nav_item(tags$span(class = "navbar-text text-white-50 small",
-                     "Curso-Taller GTFS \u00b7 MTC"))
+                     "Curso-Taller GTFS"))
 )
 
 # ============================================
