@@ -349,6 +349,24 @@ ui <- page_navbar(
         # ── Viajes y Horarios ────────────────────────────────
         nav_panel("Viajes y Horarios", icon = icon("clock"),
           uiOutput("trips_preview_ui")
+        ),
+
+        # ── Shapes / Rutas ───────────────────────────────────
+        nav_panel("Shapes / Rutas", icon = icon("draw-polygon"),
+          card(card_header("Trazado de Rutas (shapes.txt)"), card_body(
+            fluidRow(
+              column(7,
+                fileInput("shapes_csv_upload", "Cargar shapes desde CSV/TXT",
+                          accept = c(".csv", ".txt"),
+                          buttonLabel = "Seleccionar archivo",
+                          placeholder = "shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence")),
+              column(5, div(class = "mt-4 pt-2",
+                downloadButton("dl_shapes_tpl", "Plantilla CSV",
+                               class = "btn-outline-secondary btn-sm w-100")))
+            ),
+            uiOutput("shapes_info_ui"),
+            leafletOutput("map_shapes", height = "460px")
+          ))
         )
 
       ) # navset_card_tab
@@ -391,7 +409,7 @@ ui <- page_navbar(
 
   nav_spacer(),
   nav_item(tags$span(class = "navbar-text text-white-50 small",
-                     "Curso-Taller GTFS"))
+                     "Curso-Taller GTFS \u00b7 MTC"))
 )
 
 # ============================================
@@ -478,16 +496,41 @@ server <- function(input, output, session) {
 
   output$map_stops <- renderLeaflet({
     req(gtfs_an())
-    stops <- gtfs_an()$stops
-    leaflet(stops) %>%
-      addProviderTiles("CartoDB.Positron") %>%
+    gtfs   <- gtfs_an()
+    stops  <- gtfs$stops
+    shapes <- gtfs$shapes
+    pal_colors <- c("#1a73e8","#ea4335","#34a853","#fbbc04","#9c27b0","#ff6d00","#00bcd4")
+
+    m <- leaflet() %>% addProviderTiles("CartoDB.Positron")
+
+    if (!is.null(shapes) && nrow(shapes) > 0) {
+      ordered <- shapes[order(shapes$shape_id, as.integer(shapes$shape_pt_sequence)), ]
+      ids     <- unique(ordered$shape_id)
+      for (i in seq_along(ids)) {
+        pts   <- ordered[ordered$shape_id == ids[i], ]
+        color <- pal_colors[((i - 1L) %% length(pal_colors)) + 1L]
+        m <- m %>% addPolylines(
+          lng     = pts$shape_pt_lon,
+          lat     = pts$shape_pt_lat,
+          color   = color, weight = 3, opacity = 0.8,
+          label   = ids[i], group = "Rutas"
+        )
+      }
+    }
+
+    m %>%
       addCircleMarkers(
-        lng = ~stop_lon, lat = ~stop_lat, radius = 5,
+        data = stops, lng = ~stop_lon, lat = ~stop_lat, radius = 5,
         color = "#1a73e8", fillColor = "#1a73e8",
         fillOpacity = 0.8, weight = 1,
-        popup = ~paste0("<b>", stop_name, "</b><br><small>ID: ", stop_id, "</small>")
+        popup = ~paste0("<b>", stop_name, "</b><br><small>ID: ", stop_id, "</small>"),
+        group = "Paradas"
       ) %>%
-      addMeasure(primaryLengthUnit = "kilometers")
+      addMeasure(primaryLengthUnit = "kilometers") %>%
+      addLayersControl(
+        overlayGroups = c("Rutas", "Paradas"),
+        options = layersControlOptions(collapsed = FALSE)
+      )
   })
 
   output$tbl_stops <- renderDT({
@@ -541,9 +584,10 @@ server <- function(input, output, session) {
 
   # ── TAB 2: CREAR GTFS ────────────────────────────────────────
 
-  stops_rv           <- reactiveVal(DEFAULT_STOPS)
-  gtfs_zip_path      <- reactiveVal(NULL)
+  stops_rv            <- reactiveVal(DEFAULT_STOPS)
+  gtfs_zip_path       <- reactiveVal(NULL)
   generated_tables_rv <- reactiveVal(NULL)
+  shapes_rv           <- reactiveVal(NULL)
 
   # Cargar paradas desde CSV
   observeEvent(input$stops_csv, {
@@ -608,13 +652,119 @@ server <- function(input, output, session) {
     content  = function(f) write_csv(DEFAULT_STOPS[1, ], f)
   )
 
+  # Cargar shapes desde CSV / TXT
+  observeEvent(input$shapes_csv_upload, {
+    req(input$shapes_csv_upload)
+    tryCatch({
+      df <- read_csv(input$shapes_csv_upload$datapath, show_col_types = FALSE)
+      req_cols <- c("shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence")
+      if (!all(req_cols %in% names(df))) {
+        showNotification(
+          paste("El archivo debe tener columnas:", paste(req_cols, collapse = ", ")),
+          type = "error")
+        return()
+      }
+      shapes_rv(df %>%
+        mutate(shape_pt_sequence = as.integer(shape_pt_sequence)) %>%
+        arrange(shape_id, shape_pt_sequence))
+      showNotification(
+        sprintf("%d puntos cargados (%d shapes / rutas)",
+                nrow(df), length(unique(df$shape_id))),
+        type = "message")
+    }, error = function(e) showNotification(paste("Error:", e$message), type = "error"))
+  })
+
+  output$dl_shapes_tpl <- downloadHandler(
+    filename = "plantilla_shapes.csv",
+    content  = function(f) {
+      write_csv(tibble(
+        shape_id          = c("RUTA_01","RUTA_01","RUTA_01","RUTA_01",
+                              "RUTA_02","RUTA_02","RUTA_02"),
+        shape_pt_lat      = c(-8.1116,-8.1132,-8.1089,-8.1042,
+                              -8.1042,-8.1089,-8.1116),
+        shape_pt_lon      = c(-79.0289,-79.0276,-79.0254,-79.0231,
+                              -79.0231,-79.0254,-79.0289),
+        shape_pt_sequence = c(0L,1L,2L,3L, 0L,1L,2L)
+      ), f)
+    }
+  )
+
+  output$shapes_info_ui <- renderUI({
+    if (is.null(shapes_rv())) return(NULL)
+    sh <- shapes_rv()
+    div(class = "alert alert-success py-2 small mb-2",
+      icon("circle-check"),
+      sprintf(" %d shapes cargados · %d puntos totales",
+              length(unique(sh$shape_id)), nrow(sh))
+    )
+  })
+
+  output$map_shapes <- renderLeaflet({
+    stops  <- stops_rv()
+    shapes <- shapes_rv()
+    pal_colors <- c("#1a73e8","#ea4335","#34a853","#fbbc04","#9c27b0","#ff6d00","#00bcd4")
+
+    m <- leaflet() %>% addProviderTiles("CartoDB.Positron")
+
+    if (!is.null(shapes) && nrow(shapes) > 0) {
+      ids            <- unique(shapes$shape_id)
+      pts_per_shape  <- tabulate(match(shapes$shape_id, ids))
+
+      if (all(pts_per_shape == 1L)) {
+        # Every row has a unique shape_id (point-per-row format):
+        # connect ALL points as one polyline ordered by shape_pt_sequence
+        pts <- shapes[order(shapes$shape_pt_sequence), ]
+        m <- m %>% addPolylines(
+          lng     = pts$shape_pt_lon,
+          lat     = pts$shape_pt_lat,
+          color   = pal_colors[1], weight = 4, opacity = 0.85,
+          label   = paste(nrow(pts), "puntos"), group = "Shapes"
+        )
+      } else {
+        # Standard GTFS: group by shape_id, draw one polyline per shape
+        for (i in seq_along(ids)) {
+          pts <- shapes[shapes$shape_id == ids[i], ]
+          pts <- pts[order(pts$shape_pt_sequence), ]
+          if (nrow(pts) < 2L) next
+          color <- pal_colors[((i - 1L) %% length(pal_colors)) + 1L]
+          m <- m %>% addPolylines(
+            lng     = pts$shape_pt_lon,
+            lat     = pts$shape_pt_lat,
+            color   = color, weight = 4, opacity = 0.85,
+            label   = ids[i], group = "Shapes"
+          )
+        }
+      }
+    }
+
+    if (!is.null(stops) && nrow(stops) > 0) {
+      m <- m %>% addCircleMarkers(
+        data = stops, lng = ~stop_lon, lat = ~stop_lat,
+        radius = 6, color = "#ea4335", fillColor = "#ea4335",
+        fillOpacity = 0.9, weight = 2,
+        popup = ~paste0("<b>", stop_name, "</b><br><small>ID: ", stop_id, "</small>"),
+        group = "Paradas"
+      )
+    }
+
+    m %>%
+      addLayersControl(
+        overlayGroups = c("Shapes", "Paradas"),
+        options = layersControlOptions(collapsed = FALSE)
+      ) %>%
+      addMeasure(primaryLengthUnit = "kilometers")
+  })
+
   output$creator_status <- renderUI({
+    sh_n <- if (!is.null(shapes_rv())) length(unique(shapes_rv()$shape_id)) else 0L
     tags$ul(class = "list-unstyled small text-muted mb-0",
-      tags$li(icon("map-pin",  class = "text-success"),
+      tags$li(icon("map-pin",       class = "text-success"),
               sprintf(" %d paradas cargadas", nrow(stops_rv()))),
-      tags$li(icon("route",    class = "text-info"),
+      tags$li(icon("draw-polygon",  class = if (sh_n > 0) "text-warning" else "text-muted"),
+              sprintf(" %d shapes cargados", sh_n)),
+      tags$li(icon("route",         class = "text-info"),
               sprintf(" Ruta: %s (%s)", input$rt_short, input$rt_id)),
-      tags$li(icon("calendar", class = "text-primary"),
+      tags$li(icon("calendar",      class = "text-primary"),
               sprintf(" Servicios: %s", input$cal_svc))
     )
   })
@@ -704,6 +854,9 @@ server <- function(input, output, session) {
           route_id = input$rt_id
         )
       }
+
+      if (!is.null(shapes_rv()) && nrow(shapes_rv()) > 0)
+        tables$shapes <- shapes_rv()
 
       tmp <- tempfile(fileext = ".zip")
       build_and_zip_gtfs(tables, tmp)
