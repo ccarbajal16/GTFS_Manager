@@ -1346,12 +1346,20 @@ server <- function(input, output, session) {
     req(nzchar(input$osm_place))
     withProgress(message = "Geocodificando...", value = 0.5, {
       tryCatch({
-        bb <- getbb(input$osm_place)
-        updateNumericInput(session, "bbox_xmin", value = round(bb["x", "min"], 6))
-        updateNumericInput(session, "bbox_xmax", value = round(bb["x", "max"], 6))
-        updateNumericInput(session, "bbox_ymin", value = round(bb["y", "min"], 6))
-        updateNumericInput(session, "bbox_ymax", value = round(bb["y", "max"], 6))
-        osm_log("Bbox para '", input$osm_place, "' obtenido correctamente.")
+        bb <- getbb(input$osm_place, format_out = "matrix")
+        if (is.null(bb) || !is.matrix(bb) || any(is.na(bb))) {
+          showNotification(
+            paste0("Lugar '", input$osm_place, "' no encontrado. Verifica el nombre o usa bbox manual."),
+            type = "warning"
+          )
+          osm_log("Geocodificación sin resultado para '", input$osm_place, "'.")
+        } else {
+          updateNumericInput(session, "bbox_xmin", value = round(bb["x", "min"], 6))
+          updateNumericInput(session, "bbox_xmax", value = round(bb["x", "max"], 6))
+          updateNumericInput(session, "bbox_ymin", value = round(bb["y", "min"], 6))
+          updateNumericInput(session, "bbox_ymax", value = round(bb["y", "max"], 6))
+          osm_log("Bbox para '", input$osm_place, "' obtenido correctamente.")
+        }
       }, error = function(e) {
         osm_log("Error al geocodificar: ", conditionMessage(e))
         showNotification(paste("No se pudo geocodificar:", conditionMessage(e)),
@@ -1497,9 +1505,17 @@ server <- function(input, output, session) {
     routes <- osm_routes_rv()
     bbox   <- current_bbox()
 
-    m <- leaflet() |>
-      addProviderTiles("CartoDB.Positron") |>
-      fitBounds(bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"])
+    valid_bbox <- !any(is.na(bbox)) &&
+      isTRUE(bbox["xmin"] < bbox["xmax"]) &&
+      isTRUE(bbox["ymin"] < bbox["ymax"]) &&
+      isTRUE(bbox["xmin"] >= -180) && isTRUE(bbox["xmax"] <= 180) &&
+      isTRUE(bbox["ymin"] >= -90)  && isTRUE(bbox["ymax"] <= 90)
+
+    m <- leaflet() |> addProviderTiles("CartoDB.Positron")
+    m <- if (valid_bbox)
+      fitBounds(m, bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"])
+    else
+      setView(m, lng = -79.02, lat = -8.1, zoom = 12)
 
     if (!is.null(routes) && nrow(routes) > 0) {
       m <- m |> addPolylines(
