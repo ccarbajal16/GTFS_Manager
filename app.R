@@ -529,7 +529,13 @@ ui <- page_navbar(
                        class = "btn-outline-success btn-sm w-100")
       ),
 
-      uiOutput("osm_ui")
+      tagList(
+        card(
+          card_header(icon("map"), " Mapa de Resultados"),
+          leafletOutput("osm_map", height = 420)
+        ),
+        uiOutput("osm_ui")
+      )
     )
   ),
 
@@ -1472,11 +1478,6 @@ server <- function(input, output, session) {
         )
       ),
 
-      card(
-        card_header(icon("map"), " Mapa de Resultados"),
-        leafletOutput("osm_map", height = 420)
-      ),
-
       if (has_stops) {
         card(
           card_header(icon("table"), " Paradas (", nrow(stops), ")"),
@@ -1501,46 +1502,50 @@ server <- function(input, output, session) {
   })
 
   output$osm_map <- renderLeaflet({
-    stops  <- osm_stops_rv()
-    routes <- osm_routes_rv()
-    bbox   <- current_bbox()
-
-    valid_bbox <- !any(is.na(bbox)) &&
-      isTRUE(bbox["xmin"] < bbox["xmax"]) &&
-      isTRUE(bbox["ymin"] < bbox["ymax"]) &&
-      isTRUE(bbox["xmin"] >= -180) && isTRUE(bbox["xmax"] <= 180) &&
-      isTRUE(bbox["ymin"] >= -90)  && isTRUE(bbox["ymax"] <= 90)
-
-    m <- leaflet() |> addProviderTiles("CartoDB.Positron")
-    m <- if (valid_bbox)
-      fitBounds(m, bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"])
-    else
-      setView(m, lng = -79.02, lat = -8.1, zoom = 12)
-
-    if (!is.null(routes) && nrow(routes) > 0) {
-      m <- m |> addPolylines(
-        data = routes,
-        color = "#e74c3c", weight = 2.5, opacity = 0.7,
-        label  = ~if ("name" %in% names(routes)) name else osm_id,
-        group  = "Rutas"
+    leaflet() |>
+      addProviderTiles("CartoDB.Positron") |>
+      setView(lng = -79.02, lat = -8.1, zoom = 12) |>
+      addLayersControl(
+        overlayGroups = c("Paradas", "Rutas"),
+        options = layersControlOptions(collapsed = FALSE)
       )
-    }
+  })
 
+  observeEvent(current_bbox(), {
+    bbox <- current_bbox()
+    if (!any(is.na(bbox)) &&
+        isTRUE(bbox["xmin"] < bbox["xmax"]) &&
+        isTRUE(bbox["ymin"] < bbox["ymax"]) &&
+        isTRUE(bbox["xmin"] >= -180) && isTRUE(bbox["xmax"] <= 180) &&
+        isTRUE(bbox["ymin"] >= -90)  && isTRUE(bbox["ymax"] <= 90)) {
+      leafletProxy("osm_map") |>
+        fitBounds(bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"])
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(osm_stops_rv(), {
+    proxy <- leafletProxy("osm_map") |> clearGroup("Paradas")
+    stops <- osm_stops_rv()
     if (!is.null(stops) && nrow(stops) > 0) {
       lbl <- if ("name" %in% names(stops)) stops$name else stops$osm_id
       lbl[is.na(lbl)] <- "Sin nombre"
-      m <- m |> addCircleMarkers(
-        data = stops,
-        radius = 5, color = "#1a73e8", fillOpacity = 0.85,
-        stroke = FALSE, label = lbl,
-        group  = "Paradas"
+      proxy |> addCircleMarkers(
+        data = stops, radius = 5, color = "#1a73e8",
+        fillOpacity = 0.85, stroke = FALSE, label = lbl, group = "Paradas"
       )
     }
+  })
 
-    m |> addLayersControl(
-      overlayGroups = c("Paradas", "Rutas"),
-      options = layersControlOptions(collapsed = FALSE)
-    )
+  observeEvent(osm_routes_rv(), {
+    proxy <- leafletProxy("osm_map") |> clearGroup("Rutas")
+    routes <- osm_routes_rv()
+    if (!is.null(routes) && nrow(routes) > 0) {
+      lbl <- if ("name" %in% names(routes)) routes$name else routes$osm_id
+      proxy |> addPolylines(
+        data = routes, color = "#e74c3c", weight = 2.5,
+        opacity = 0.7, label = lbl, group = "Rutas"
+      )
+    }
   })
 
   output$osm_stops_table <- renderDT({
