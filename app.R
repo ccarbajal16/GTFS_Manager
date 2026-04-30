@@ -7,6 +7,7 @@ library(shiny)
 library(bslib)
 library(DT)
 library(leaflet)
+library(leaflet.extras)
 library(tidytransit)
 library(gtfstools)
 library(sf)
@@ -15,6 +16,7 @@ library(dplyr)
 library(readr)
 library(purrr)
 library(zip)
+library(osmdata)
 
 # ============================================
 # FUNCIONES AUXILIARES
@@ -65,6 +67,21 @@ generate_trips_stop_times <- function(stops_df, route_id, service_id,
     }
   }
   list(trips = bind_rows(trips_out), stop_times = bind_rows(st_out))
+}
+
+osm_routes_to_shapes <- function(routes_sf, route_id) {
+  routes_sf <- routes_sf[!st_is_empty(routes_sf), ]
+  if (nrow(routes_sf) == 0) return(NULL)
+  bind_rows(lapply(seq_len(nrow(routes_sf)), function(i) {
+    coords <- tryCatch(st_coordinates(routes_sf[i, ]), error = function(e) NULL)
+    if (is.null(coords) || nrow(coords) == 0) return(NULL)
+    tibble(
+      shape_id          = paste0(route_id, "_", i),
+      shape_pt_lat      = coords[, "Y"],
+      shape_pt_lon      = coords[, "X"],
+      shape_pt_sequence = seq_len(nrow(coords))
+    )
+  }))
 }
 
 build_and_zip_gtfs <- function(tables, output_zip) {
@@ -145,6 +162,74 @@ DEFAULT_STOPS <- tibble(
   stop_code = sprintf("PA%03d", 1:6)
 )
 
+OSM_MIRRORS <- c(
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass.openstreetmap.ru/api/interpreter"
+)
+
+fetch_osm_stops <- function(bbox, mirrors = OSM_MIRRORS, max_attempts = 3, base_wait = 30) {
+  for (mirror in mirrors) {
+    set_overpass_url(mirror)
+    query <- opq(bbox = bbox, timeout = 90) |>
+      add_osm_feature(key = "highway", value = "bus_stop")
+    for (attempt in seq_len(max_attempts)) {
+      result <- tryCatch(osmdata_sf(query), error = function(e) {
+        if (grepl("429|Too Many Requests", conditionMessage(e), ignore.case = TRUE))
+          Sys.sleep(base_wait * 2^(attempt - 1))
+        NULL
+      })
+      if (!is.null(result)) {
+        pts <- result$osm_points
+        if (!is.null(pts) && nrow(pts) > 0) {
+          pts <- pts[!is.na(pts$highway) & pts$highway == "bus_stop", ]
+          coords <- st_coordinates(pts)
+          keep <- intersect(
+            c("osm_id", "name", "ref", "operator", "network", "shelter", "bench", "wheelchair"),
+            names(pts)
+          )
+          pts <- pts[, c(keep, "geometry")]
+          pts$lon <- coords[, "X"]
+          pts$lat <- coords[, "Y"]
+          return(pts)
+        }
+        return(st_sf(geometry = st_sfc(crs = 4326)))
+      }
+    }
+  }
+  stop("All Overpass mirrors exhausted. Try again later.")
+}
+
+fetch_osm_routes <- function(bbox, route_type = "bus", mirrors = OSM_MIRRORS,
+                             max_attempts = 3, base_wait = 30) {
+  for (mirror in mirrors) {
+    set_overpass_url(mirror)
+    query <- opq(bbox = bbox, timeout = 90) |>
+      add_osm_feature(key = "route", value = route_type)
+    for (attempt in seq_len(max_attempts)) {
+      result <- tryCatch(osmdata_sf(query), error = function(e) {
+        if (grepl("429|Too Many Requests", conditionMessage(e), ignore.case = TRUE))
+          Sys.sleep(base_wait * 2^(attempt - 1))
+        NULL
+      })
+      if (!is.null(result)) {
+        lines <- result$osm_multilines
+        if (!is.null(lines) && nrow(lines) > 0) {
+          keep <- intersect(
+            c("osm_id", "name", "ref", "operator", "network", "from", "to", "colour", "route", "wheelchair"),
+            names(lines)
+          )
+          lines <- lines[, c(keep, "geometry")]
+          return(lines)
+        }
+        return(st_sf(geometry = st_sfc(crs = 4326)))
+      }
+    }
+  }
+  stop("All Overpass mirrors exhausted. Try again later.")
+}
+
 # ============================================
 # UI
 # ============================================
@@ -155,14 +240,34 @@ ui <- page_navbar(
   bg = "#1a73e8",
   inverse = TRUE,
 
-  tags$head(tags$style(HTML("
-    .sidebar { border-right: 1px solid #dee2e6; }
-    .value-box .value-box-value { font-size: 1.8rem; }
-    .nav-tabs .nav-link { font-size: .9rem; }
-    .card-header { font-weight: 600; }
-    .placeholder-msg { color: #6c757d; text-align: center; padding: 60px 20px; }
-    .placeholder-msg .fa { font-size: 3rem; display: block; margin-bottom: 12px; opacity: .4; }
-  "))),
+  tags$head(
+    tags$style(HTML("
+      .sidebar { border-right: 1px solid #dee2e6; }
+      .value-box .value-box-value { font-size: 1.8rem; }
+      .nav-tabs .nav-link { font-size: .9rem; }
+      .card-header { font-weight: 600; }
+      .placeholder-msg { color: #6c757d; text-align: center; padding: 60px 20px; }
+      .placeholder-msg .fa { font-size: 3rem; display: block; margin-bottom: 12px; opacity: .4; }
+    ")),
+    tags$script(HTML("
+      $(document).ready(function() {
+        setTimeout(function() {
+          if (window.L && L.Map && L.Map.prototype.fitBounds) {
+            var _origFitBounds = L.Map.prototype.fitBounds;
+            L.Map.prototype.fitBounds = function(bounds, options) {
+              try {
+                var b = L.latLngBounds(bounds);
+                if (!b || !b.isValid()) return this;
+                return _origFitBounds.call(this, b, options);
+              } catch(e) {
+                return this;
+              }
+            };
+          }
+        }, 0);
+      });
+    "))
+  ),
 
   # ─────────────────────────────────────────────────────────────
   # TAB 1: ANÁLISIS
@@ -353,20 +458,32 @@ ui <- page_navbar(
 
         # ── Shapes / Rutas ───────────────────────────────────
         nav_panel("Shapes / Rutas", icon = icon("draw-polygon"),
-          card(card_header("Trazado de Rutas (shapes.txt)"), card_body(
-            fluidRow(
-              column(7,
-                fileInput("shapes_csv_upload", "Cargar shapes desde CSV/TXT",
-                          accept = c(".csv", ".txt"),
-                          buttonLabel = "Seleccionar archivo",
-                          placeholder = "shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence")),
-              column(5, div(class = "mt-4 pt-2",
-                downloadButton("dl_shapes_tpl", "Plantilla CSV",
-                               class = "btn-outline-secondary btn-sm w-100")))
+          layout_columns(
+            col_widths = c(3, 9),
+            div(
+              class = "p-1",
+              tags$p(class = "fw-bold text-primary mb-1 small", "RUTAS OSM"),
+              tags$p(class = "text-muted small mb-2",
+                     "Importa las rutas extraídas en la pestaña Extraer OSM."),
+              actionButton("btn_import_osm_shapes", "Importar desde OSM",
+                           icon  = icon("file-import"),
+                           class = "btn-primary w-100 mb-2"),
+              uiOutput("shapes_info_ui"),
+              uiOutput("dl_shapes_generated_ui"),
+              hr(),
+              tags$p(class = "fw-bold text-muted mb-1 small", "O CARGAR ARCHIVO"),
+              fileInput("shapes_csv_upload", NULL,
+                        accept      = c(".csv", ".txt"),
+                        buttonLabel = "CSV/TXT",
+                        placeholder = "shape_id, shape_pt_lat ..."),
+              downloadButton("dl_shapes_tpl", "Plantilla CSV",
+                             class = "btn-outline-secondary btn-sm w-100")
             ),
-            uiOutput("shapes_info_ui"),
-            leafletOutput("map_shapes", height = "460px")
-          ))
+            card(
+              card_header(icon("map"), " Mapa de Rutas"),
+              leafletOutput("map_shapes", height = 640)
+            )
+          )
         )
 
       ) # navset_card_tab
@@ -404,6 +521,69 @@ ui <- page_navbar(
                        class = "btn-outline-info btn-sm w-100")
       ),
       uiOutput("avanzado_ui")
+    )
+  ),
+
+  # ─────────────────────────────────────────────────────────────
+  # TAB 4: EXTRAER DESDE OSM
+  # ─────────────────────────────────────────────────────────────
+  nav_panel(
+    "Extraer OSM", icon = icon("map-location-dot"),
+
+    layout_sidebar(
+      sidebar = sidebar(
+        width = 290, bg = "#f8f9fa",
+
+        tags$p(class = "fw-bold text-primary mb-1 small", "ÁREA DE INTERÉS"),
+        tags$p(class = "text-muted small mb-2",
+               icon("draw-polygon"),
+               " Dibuja un rectángulo en el mapa o ingresa las coordenadas manualmente."),
+        fluidRow(
+          column(6, numericInput("bbox_xmin", "Lon mín (W)", value = NA, step = 0.001)),
+          column(6, numericInput("bbox_xmax", "Lon máx (E)", value = NA, step = 0.001))
+        ),
+        fluidRow(
+          column(6, numericInput("bbox_ymin", "Lat mín (S)", value = NA, step = 0.001)),
+          column(6, numericInput("bbox_ymax", "Lat máx (N)", value = NA, step = 0.001))
+        ),
+        hr(),
+
+        tags$p(class = "fw-bold text-primary mb-1 small", "TIPO DE RUTA OSM"),
+        selectInput("osm_route_type", NULL,
+                    choices = c("bus", "share_taxi", "trolleybus"),
+                    selected = "bus"),
+        hr(),
+
+        tags$p(class = "fw-bold text-muted mb-1 small", "EXTRACCIÓN"),
+        actionButton("btn_extract_stops", "Extraer Paradas",
+                     icon = icon("circle-dot"),
+                     class = "btn-primary w-100 mb-1"),
+        actionButton("btn_extract_routes", "Extraer Rutas",
+                     icon = icon("route"),
+                     class = "btn-primary w-100 mb-3"),
+        hr(),
+
+        tags$p(class = "fw-bold text-muted mb-1 small", "ACCIONES"),
+        actionButton("btn_send_stops_to_gtfs", "Enviar paradas a Crear GTFS",
+                     icon = icon("arrow-right"),
+                     class = "btn-success w-100 mb-2"),
+        downloadButton("dl_osm_stops_geojson", " Paradas (GeoJSON)",
+                       class = "btn-outline-success btn-sm w-100 mb-1"),
+        downloadButton("dl_osm_routes_geojson", " Rutas (GeoJSON)",
+                       class = "btn-outline-success btn-sm w-100")
+      ),
+
+      layout_columns(
+        col_widths = c(8, 4),
+        card(
+          card_header(icon("map"), " Mapa de Resultados"),
+          leafletOutput("osm_map", height = 680)
+        ),
+        div(
+          style = "overflow-y: auto; max-height: 730px;",
+          uiOutput("osm_ui")
+        )
+      )
     )
   ),
 
@@ -588,6 +768,7 @@ server <- function(input, output, session) {
   gtfs_zip_path       <- reactiveVal(NULL)
   generated_tables_rv <- reactiveVal(NULL)
   shapes_rv           <- reactiveVal(NULL)
+  shapes_generated    <- reactiveVal(FALSE)
 
   # Cargar paradas desde CSV
   observeEvent(input$stops_csv, {
@@ -667,12 +848,53 @@ server <- function(input, output, session) {
       shapes_rv(df %>%
         mutate(shape_pt_sequence = as.integer(shape_pt_sequence)) %>%
         arrange(shape_id, shape_pt_sequence))
+      shapes_generated(FALSE)
       showNotification(
         sprintf("%d puntos cargados (%d shapes / rutas)",
                 nrow(df), length(unique(df$shape_id))),
         type = "message")
     }, error = function(e) showNotification(paste("Error:", e$message), type = "error"))
   })
+
+  # Importar rutas OSM como shapes
+  observeEvent(input$btn_import_osm_shapes, {
+    routes <- osm_routes_rv()
+    if (is.null(routes) || nrow(routes) == 0) {
+      showNotification(
+        "No hay rutas OSM disponibles. Ve a 'Extraer OSM' y extrae rutas primero.",
+        type = "warning"
+      )
+      return()
+    }
+    sh <- osm_routes_to_shapes(routes, input$rt_id)
+    if (is.null(sh) || nrow(sh) == 0) {
+      showNotification("No se pudieron extraer coordenadas de las rutas OSM.",
+                       type = "error")
+      return()
+    }
+    shapes_rv(sh)
+    shapes_generated(TRUE)
+    showNotification(
+      sprintf("%d shapes importados · %d puntos totales",
+              length(unique(sh$shape_id)), nrow(sh)),
+      type = "message"
+    )
+  })
+
+  output$dl_shapes_generated_ui <- renderUI({
+    req(shapes_rv(), shapes_generated())
+    downloadButton("dl_shapes_generated", icon("download"), " shapes.txt",
+                   class = "btn-outline-success btn-sm w-100")
+  })
+
+  output$dl_shapes_generated <- downloadHandler(
+    filename = function()
+      paste0("shapes_", input$rt_id, "_", format(Sys.Date(), "%Y%m%d"), ".txt"),
+    content = function(f) {
+      req(shapes_rv())
+      write_csv(shapes_rv(), f, na = "")
+    }
+  )
 
   output$dl_shapes_tpl <- downloadHandler(
     filename = "plantilla_shapes.csv",
@@ -707,34 +929,22 @@ server <- function(input, output, session) {
     m <- leaflet() %>% addProviderTiles("CartoDB.Positron")
 
     if (!is.null(shapes) && nrow(shapes) > 0) {
-      ids            <- unique(shapes$shape_id)
-      pts_per_shape  <- tabulate(match(shapes$shape_id, ids))
-
-      if (all(pts_per_shape == 1L)) {
-        # Every row has a unique shape_id (point-per-row format):
-        # connect ALL points as one polyline ordered by shape_pt_sequence
-        pts <- shapes[order(shapes$shape_pt_sequence), ]
+      ids <- unique(shapes$shape_id)
+      for (i in seq_along(ids)) {
+        pts <- shapes[shapes$shape_id == ids[i], ]
+        pts <- pts[order(pts$shape_pt_sequence), ]
+        if (nrow(pts) < 2L) next
+        color <- pal_colors[((i - 1L) %% length(pal_colors)) + 1L]
         m <- m %>% addPolylines(
-          lng     = pts$shape_pt_lon,
-          lat     = pts$shape_pt_lat,
-          color   = pal_colors[1], weight = 4, opacity = 0.85,
-          label   = paste(nrow(pts), "puntos"), group = "Shapes"
+          lng = pts$shape_pt_lon, lat = pts$shape_pt_lat,
+          color = color, weight = 3.5, opacity = 0.85,
+          label = ids[i], group = "Shapes"
         )
-      } else {
-        # Standard GTFS: group by shape_id, draw one polyline per shape
-        for (i in seq_along(ids)) {
-          pts <- shapes[shapes$shape_id == ids[i], ]
-          pts <- pts[order(pts$shape_pt_sequence), ]
-          if (nrow(pts) < 2L) next
-          color <- pal_colors[((i - 1L) %% length(pal_colors)) + 1L]
-          m <- m %>% addPolylines(
-            lng     = pts$shape_pt_lon,
-            lat     = pts$shape_pt_lat,
-            color   = color, weight = 4, opacity = 0.85,
-            label   = ids[i], group = "Shapes"
-          )
-        }
       }
+      m <- m %>% fitBounds(
+        lng1 = min(shapes$shape_pt_lon), lat1 = min(shapes$shape_pt_lat),
+        lng2 = max(shapes$shape_pt_lon), lat2 = max(shapes$shape_pt_lat)
+      )
     }
 
     if (!is.null(stops) && nrow(stops) > 0) {
@@ -855,8 +1065,16 @@ server <- function(input, output, session) {
         )
       }
 
-      if (!is.null(shapes_rv()) && nrow(shapes_rv()) > 0)
+      if (!is.null(shapes_rv()) && nrow(shapes_rv()) > 0) {
         tables$shapes <- shapes_rv()
+        if (isTRUE(shapes_generated())) {
+          sh_ids <- unique(shapes_rv()$shape_id)
+          ida_id <- sh_ids[1]
+          vta_id <- if (length(sh_ids) >= 2L) sh_ids[2] else sh_ids[1]
+          tables$trips <- tables$trips |>
+            mutate(shape_id = ifelse(direction_id == 0L, ida_id, vta_id))
+        }
+      }
 
       tmp <- tempfile(fileext = ".zip")
       build_and_zip_gtfs(tables, tmp)
@@ -1202,6 +1420,249 @@ server <- function(input, output, session) {
     content  = function(f) {
       req(gtfs_adv())
       writeLines(generate_html_report(gtfs_adv()), f)
+    }
+  )
+
+  # ── TAB 4: EXTRAER DESDE OSM ─────────────────────────────────
+
+  osm_stops_rv  <- reactiveVal(NULL)
+  osm_routes_rv <- reactiveVal(NULL)
+  osm_log_rv    <- reactiveVal(character(0))
+
+  osm_log <- function(...) {
+    msg <- paste0("[", format(Sys.time(), "%H:%M:%S"), "] ", ...)
+    osm_log_rv(c(osm_log_rv(), msg))
+  }
+
+  current_bbox <- reactive({
+    c(xmin = input$bbox_xmin, ymin = input$bbox_ymin,
+      xmax = input$bbox_xmax, ymax = input$bbox_ymax)
+  }) |> debounce(400)
+
+  observeEvent(input$btn_extract_stops, {
+    if (any(is.na(current_bbox()))) {
+      showNotification("Define primero el área de interés: dibuja un rectángulo en el mapa o ingresa las coordenadas manualmente.", type = "warning")
+      return()
+    }
+    osm_log_rv(character(0))
+    osm_stops_rv(NULL)
+    withProgress(message = "Consultando Overpass API...", value = 0, {
+      setProgress(0.2, detail = "Descargando paradas de bus...")
+      osm_log("Iniciando extracción de paradas para bbox: ",
+              paste(round(current_bbox(), 4), collapse = ", "))
+      tryCatch({
+        stops <- fetch_osm_stops(current_bbox())
+        osm_stops_rv(stops)
+        osm_log(nrow(stops), " paradas encontradas.")
+        setProgress(1, detail = "Listo.")
+      }, error = function(e) {
+        osm_log("Error: ", conditionMessage(e))
+        showNotification(conditionMessage(e), type = "error")
+      })
+    })
+  })
+
+  observeEvent(input$btn_extract_routes, {
+    if (any(is.na(current_bbox()))) {
+      showNotification("Define primero el área de interés: dibuja un rectángulo en el mapa o ingresa las coordenadas manualmente.", type = "warning")
+      return()
+    }
+    osm_routes_rv(NULL)
+    withProgress(message = "Consultando Overpass API...", value = 0, {
+      setProgress(0.2, detail = paste("Descargando rutas:", input$osm_route_type))
+      osm_log("Iniciando extracción de rutas '", input$osm_route_type,
+              "' para bbox: ", paste(round(current_bbox(), 4), collapse = ", "))
+      tryCatch({
+        routes <- fetch_osm_routes(current_bbox(), route_type = input$osm_route_type)
+        osm_routes_rv(routes)
+        osm_log(nrow(routes), " rutas encontradas.")
+        setProgress(1, detail = "Listo.")
+      }, error = function(e) {
+        osm_log("Error: ", conditionMessage(e))
+        showNotification(conditionMessage(e), type = "error")
+      })
+    })
+  })
+
+  observeEvent(input$btn_send_stops_to_gtfs, {
+    stops <- osm_stops_rv()
+    req(!is.null(stops) && nrow(stops) > 0)
+    coords <- st_coordinates(stops)
+    new_stops <- data.frame(
+      stop_id   = if ("osm_id" %in% names(stops)) as.character(stops$osm_id) else sprintf("S%03d", seq_len(nrow(stops))),
+      stop_name = if ("name" %in% names(stops)) ifelse(is.na(stops$name), paste("Parada", seq_len(nrow(stops))), stops$name) else paste("Parada", seq_len(nrow(stops))),
+      stop_lat  = round(coords[, "Y"], 7),
+      stop_lon  = round(coords[, "X"], 7),
+      stop_code = if ("ref" %in% names(stops)) ifelse(is.na(stops$ref), sprintf("OSM%03d", seq_len(nrow(stops))), stops$ref) else sprintf("OSM%03d", seq_len(nrow(stops))),
+      stringsAsFactors = FALSE
+    )
+    stops_rv(new_stops)
+    showNotification(
+      paste(nrow(new_stops), "paradas enviadas a 'Crear GTFS' → pestaña Paradas."),
+      type = "message"
+    )
+    osm_log(nrow(new_stops), " paradas enviadas a la pestaña Crear GTFS.")
+  })
+
+  output$osm_ui <- renderUI({
+    stops  <- osm_stops_rv()
+    routes <- osm_routes_rv()
+    log    <- osm_log_rv()
+
+    has_stops  <- !is.null(stops)  && nrow(stops)  > 0
+    has_routes <- !is.null(routes) && nrow(routes) > 0
+
+    tagList(
+      if (length(log) > 0) {
+        card(
+          card_header(icon("terminal"), " Registro"),
+          tags$pre(style = "font-size:.75rem; max-height:90px; overflow-y:auto; margin:0;",
+                   paste(log, collapse = "\n"))
+        )
+      },
+
+      layout_columns(
+        col_widths = c(6, 6),
+        value_box(
+          title = "Paradas OSM",
+          value = if (has_stops) nrow(stops) else "—",
+          showcase = icon("circle-dot"),
+          theme = if (has_stops) "primary" else "secondary"
+        ),
+        value_box(
+          title = "Rutas OSM",
+          value = if (has_routes) nrow(routes) else "—",
+          showcase = icon("route"),
+          theme = if (has_routes) "primary" else "secondary"
+        )
+      ),
+
+      if (has_stops) {
+        card(
+          card_header(icon("table"), " Paradas (", nrow(stops), ")"),
+          DTOutput("osm_stops_table", height = "180px")
+        )
+      },
+
+      if (has_routes) {
+        card(
+          card_header(icon("table"), " Rutas (", nrow(routes), ")"),
+          DTOutput("osm_routes_table", height = "180px")
+        )
+      },
+
+      if (!has_stops && !has_routes && length(log) == 0) {
+        tags$div(class = "placeholder-msg",
+          icon("map-location-dot"),
+          tags$p("Ingresa un área de interés y extrae paradas o rutas desde OpenStreetMap.")
+        )
+      }
+    )
+  })
+
+  output$osm_map <- renderLeaflet({
+    leaflet() |>
+      addProviderTiles("CartoDB.Positron") |>
+      setView(lng = -75, lat = -10, zoom = 5) |>
+      addDrawToolbar(
+        targetGroup          = "Bbox",
+        polylineOptions      = FALSE,
+        polygonOptions       = FALSE,
+        circleOptions        = FALSE,
+        markerOptions        = FALSE,
+        circleMarkerOptions  = FALSE,
+        rectangleOptions     = drawRectangleOptions(
+          shapeOptions = drawShapeOptions(fillOpacity = 0.1, color = "#1a73e8")
+        )
+      ) |>
+      addLayersControl(
+        overlayGroups = c("Paradas", "Rutas"),
+        options = layersControlOptions(collapsed = FALSE)
+      )
+  })
+
+  observeEvent(input$osm_map_draw_new_feature, {
+    feat <- input$osm_map_draw_new_feature
+    if (!is.null(feat) && feat$geometry$type == "Polygon") {
+      coords <- feat$geometry$coordinates[[1]]
+      lons <- sapply(coords, `[[`, 1)
+      lats <- sapply(coords, `[[`, 2)
+      updateNumericInput(session, "bbox_xmin", value = round(min(lons), 6))
+      updateNumericInput(session, "bbox_xmax", value = round(max(lons), 6))
+      updateNumericInput(session, "bbox_ymin", value = round(min(lats), 6))
+      updateNumericInput(session, "bbox_ymax", value = round(max(lats), 6))
+      osm_log("Bbox dibujada: xmin=", round(min(lons), 4), ", xmax=", round(max(lons), 4),
+              ", ymin=", round(min(lats), 4), ", ymax=", round(max(lats), 4))
+    }
+  })
+
+  observeEvent(current_bbox(), {
+    bbox <- current_bbox()
+    if (all(is.finite(bbox)) &&
+        isTRUE(bbox["xmin"] < bbox["xmax"]) &&
+        isTRUE(bbox["ymin"] < bbox["ymax"]) &&
+        isTRUE(bbox["xmin"] >= -180) && isTRUE(bbox["xmax"] <= 180) &&
+        isTRUE(bbox["ymin"] >= -90)  && isTRUE(bbox["ymax"] <= 90)) {
+      leafletProxy("osm_map") |>
+        fitBounds(bbox["xmin"], bbox["ymin"], bbox["xmax"], bbox["ymax"])
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(osm_stops_rv(), {
+    proxy <- leafletProxy("osm_map") |> clearGroup("Paradas")
+    stops <- osm_stops_rv()
+    if (!is.null(stops) && nrow(stops) > 0) {
+      lbl <- if ("name" %in% names(stops)) stops$name else stops$osm_id
+      lbl[is.na(lbl)] <- "Sin nombre"
+      proxy |> addCircleMarkers(
+        data = stops, radius = 5, color = "#1a73e8",
+        fillOpacity = 0.85, stroke = FALSE, label = lbl, group = "Paradas"
+      )
+    }
+  })
+
+  observeEvent(osm_routes_rv(), {
+    proxy <- leafletProxy("osm_map") |> clearGroup("Rutas")
+    routes <- osm_routes_rv()
+    if (!is.null(routes) && nrow(routes) > 0) {
+      routes <- routes[!st_is_empty(routes), ]
+      if (nrow(routes) == 0) return()
+      # addPolylines requires LINESTRING; MULTILINESTRING causes "shapes.map is not a function"
+      routes <- tryCatch(st_cast(routes, "LINESTRING", warn = FALSE), error = function(e) routes)
+      lbl <- if ("name" %in% names(routes)) routes$name else routes$osm_id
+      lbl[is.na(lbl)] <- "Sin nombre"
+      proxy |> addPolylines(
+        data = routes, color = "#e74c3c", weight = 2.5,
+        opacity = 0.7, label = lbl, group = "Rutas"
+      )
+    }
+  })
+
+  output$osm_stops_table <- renderDT({
+    req(osm_stops_rv())
+    df <- st_drop_geometry(osm_stops_rv())
+    datatable(df, options = list(pageLength = 8, scrollX = TRUE), rownames = FALSE)
+  })
+
+  output$osm_routes_table <- renderDT({
+    req(osm_routes_rv())
+    df <- st_drop_geometry(osm_routes_rv())
+    datatable(df, options = list(pageLength = 8, scrollX = TRUE), rownames = FALSE)
+  })
+
+  output$dl_osm_stops_geojson <- downloadHandler(
+    filename = function() paste0("osm_stops_", format(Sys.Date(), "%Y%m%d"), ".geojson"),
+    content  = function(f) {
+      req(osm_stops_rv())
+      st_write(osm_stops_rv(), f, driver = "GeoJSON", delete_dsn = TRUE, quiet = TRUE)
+    }
+  )
+
+  output$dl_osm_routes_geojson <- downloadHandler(
+    filename = function() paste0("osm_routes_", format(Sys.Date(), "%Y%m%d"), ".geojson"),
+    content  = function(f) {
+      req(osm_routes_rv())
+      st_write(osm_routes_rv(), f, driver = "GeoJSON", delete_dsn = TRUE, quiet = TRUE)
     }
   )
 }

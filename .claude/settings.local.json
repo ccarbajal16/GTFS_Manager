@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Rscript -e \"parse\\(file='app.R'\\)\")",
+      "Bash(Rscript -e \"parse\\(file='app.R'\\); cat\\('OK\\\\n'\\)\")"
+    ]
+  }
+}
