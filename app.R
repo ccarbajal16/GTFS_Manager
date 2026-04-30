@@ -1352,7 +1352,7 @@ server <- function(input, output, session) {
   current_bbox <- reactive({
     c(xmin = input$bbox_xmin, ymin = input$bbox_ymin,
       xmax = input$bbox_xmax, ymax = input$bbox_ymax)
-  })
+  }) |> debounce(400)
 
   observeEvent(input$btn_extract_stops, {
     if (any(is.na(current_bbox()))) {
@@ -1480,7 +1480,7 @@ server <- function(input, output, session) {
       addProviderTiles("CartoDB.Positron") |>
       setView(lng = -75, lat = -10, zoom = 5) |>
       addDrawToolbar(
-        targetGroup   = "Bbox",
+        targetGroup          = "Bbox",
         polylineOptions      = FALSE,
         polygonOptions       = FALSE,
         circleOptions        = FALSE,
@@ -1488,8 +1488,7 @@ server <- function(input, output, session) {
         circleMarkerOptions  = FALSE,
         rectangleOptions     = drawRectangleOptions(
           shapeOptions = drawShapeOptions(fillOpacity = 0.1, color = "#1a73e8")
-        ),
-        editOptions = editToolbarOptions(selectedPathOptions = selectedPathOptions())
+        )
       ) |>
       addLayersControl(
         overlayGroups = c("Paradas", "Rutas"),
@@ -1514,7 +1513,7 @@ server <- function(input, output, session) {
 
   observeEvent(current_bbox(), {
     bbox <- current_bbox()
-    if (!any(is.na(bbox)) &&
+    if (all(is.finite(bbox)) &&
         isTRUE(bbox["xmin"] < bbox["xmax"]) &&
         isTRUE(bbox["ymin"] < bbox["ymax"]) &&
         isTRUE(bbox["xmin"] >= -180) && isTRUE(bbox["xmax"] <= 180) &&
