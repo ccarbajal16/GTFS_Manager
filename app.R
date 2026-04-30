@@ -7,6 +7,7 @@ library(shiny)
 library(bslib)
 library(DT)
 library(leaflet)
+library(leaflet.extras)
 library(tidytransit)
 library(gtfstools)
 library(sf)
@@ -487,20 +488,16 @@ ui <- page_navbar(
         width = 290, bg = "#f8f9fa",
 
         tags$p(class = "fw-bold text-primary mb-1 small", "ÁREA DE INTERÉS"),
-        textInput("osm_place", "Ciudad o lugar",
-                  value = "Trujillo, Peru",
-                  placeholder = "Ej. Trujillo, Peru"),
-        actionButton("osm_geocode_btn", "Geocodificar",
-                     icon = icon("magnifying-glass"),
-                     class = "btn-outline-secondary btn-sm w-100 mb-2"),
-        tags$p(class = "text-muted small mb-1", "— o ingresa bbox manualmente —"),
+        tags$p(class = "text-muted small mb-2",
+               icon("draw-polygon"),
+               " Dibuja un rectángulo en el mapa o ingresa las coordenadas manualmente."),
         fluidRow(
-          column(6, numericInput("bbox_xmin", "Lon mín (W)", value = -79.094, step = 0.001)),
-          column(6, numericInput("bbox_xmax", "Lon máx (E)", value = -78.953, step = 0.001))
+          column(6, numericInput("bbox_xmin", "Lon mín (W)", value = NA, step = 0.001)),
+          column(6, numericInput("bbox_xmax", "Lon máx (E)", value = NA, step = 0.001))
         ),
         fluidRow(
-          column(6, numericInput("bbox_ymin", "Lat mín (S)", value = -8.163, step = 0.001)),
-          column(6, numericInput("bbox_ymax", "Lat máx (N)", value = -8.034, step = 0.001))
+          column(6, numericInput("bbox_ymin", "Lat mín (S)", value = NA, step = 0.001)),
+          column(6, numericInput("bbox_ymax", "Lat máx (N)", value = NA, step = 0.001))
         ),
         hr(),
 
@@ -1352,38 +1349,16 @@ server <- function(input, output, session) {
     osm_log_rv(c(osm_log_rv(), msg))
   }
 
-  observeEvent(input$osm_geocode_btn, {
-    req(nzchar(input$osm_place))
-    withProgress(message = "Geocodificando...", value = 0.5, {
-      tryCatch({
-        bb <- getbb(input$osm_place, format_out = "matrix")
-        if (is.null(bb) || !is.matrix(bb) || any(is.na(bb))) {
-          showNotification(
-            paste0("Lugar '", input$osm_place, "' no encontrado. Verifica el nombre o usa bbox manual."),
-            type = "warning"
-          )
-          osm_log("Geocodificación sin resultado para '", input$osm_place, "'.")
-        } else {
-          updateNumericInput(session, "bbox_xmin", value = round(bb["x", "min"], 6))
-          updateNumericInput(session, "bbox_xmax", value = round(bb["x", "max"], 6))
-          updateNumericInput(session, "bbox_ymin", value = round(bb["y", "min"], 6))
-          updateNumericInput(session, "bbox_ymax", value = round(bb["y", "max"], 6))
-          osm_log("Bbox para '", input$osm_place, "' obtenido correctamente.")
-        }
-      }, error = function(e) {
-        osm_log("Error al geocodificar: ", conditionMessage(e))
-        showNotification(paste("No se pudo geocodificar:", conditionMessage(e)),
-                         type = "error")
-      })
-    })
-  })
-
   current_bbox <- reactive({
     c(xmin = input$bbox_xmin, ymin = input$bbox_ymin,
       xmax = input$bbox_xmax, ymax = input$bbox_ymax)
   })
 
   observeEvent(input$btn_extract_stops, {
+    if (any(is.na(current_bbox()))) {
+      showNotification("Define primero el área de interés: dibuja un rectángulo en el mapa o ingresa las coordenadas manualmente.", type = "warning")
+      return()
+    }
     osm_log_rv(character(0))
     osm_stops_rv(NULL)
     withProgress(message = "Consultando Overpass API...", value = 0, {
@@ -1403,6 +1378,10 @@ server <- function(input, output, session) {
   })
 
   observeEvent(input$btn_extract_routes, {
+    if (any(is.na(current_bbox()))) {
+      showNotification("Define primero el área de interés: dibuja un rectángulo en el mapa o ingresa las coordenadas manualmente.", type = "warning")
+      return()
+    }
     osm_routes_rv(NULL)
     withProgress(message = "Consultando Overpass API...", value = 0, {
       setProgress(0.2, detail = paste("Descargando rutas:", input$osm_route_type))
@@ -1499,11 +1478,38 @@ server <- function(input, output, session) {
   output$osm_map <- renderLeaflet({
     leaflet() |>
       addProviderTiles("CartoDB.Positron") |>
-      setView(lng = -79.02, lat = -8.1, zoom = 12) |>
+      setView(lng = -75, lat = -10, zoom = 5) |>
+      addDrawToolbar(
+        targetGroup   = "Bbox",
+        polylineOptions      = FALSE,
+        polygonOptions       = FALSE,
+        circleOptions        = FALSE,
+        markerOptions        = FALSE,
+        circleMarkerOptions  = FALSE,
+        rectangleOptions     = drawRectangleOptions(
+          shapeOptions = drawShapeOptions(fillOpacity = 0.1, color = "#1a73e8")
+        ),
+        editOptions = editToolbarOptions(selectedPathOptions = selectedPathOptions())
+      ) |>
       addLayersControl(
         overlayGroups = c("Paradas", "Rutas"),
         options = layersControlOptions(collapsed = FALSE)
       )
+  })
+
+  observeEvent(input$osm_map_draw_new_feature, {
+    feat <- input$osm_map_draw_new_feature
+    if (!is.null(feat) && feat$geometry$type == "Polygon") {
+      coords <- feat$geometry$coordinates[[1]]
+      lons <- sapply(coords, `[[`, 1)
+      lats <- sapply(coords, `[[`, 2)
+      updateNumericInput(session, "bbox_xmin", value = round(min(lons), 6))
+      updateNumericInput(session, "bbox_xmax", value = round(max(lons), 6))
+      updateNumericInput(session, "bbox_ymin", value = round(min(lats), 6))
+      updateNumericInput(session, "bbox_ymax", value = round(max(lats), 6))
+      osm_log("Bbox dibujada: xmin=", round(min(lons), 4), ", xmax=", round(max(lons), 4),
+              ", ymin=", round(min(lats), 4), ", ymax=", round(max(lats), 4))
+    }
   })
 
   observeEvent(current_bbox(), {
