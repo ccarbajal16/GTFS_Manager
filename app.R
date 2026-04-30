@@ -529,12 +529,16 @@ ui <- page_navbar(
                        class = "btn-outline-success btn-sm w-100")
       ),
 
-      tagList(
+      layout_columns(
+        col_widths = c(8, 4),
         card(
           card_header(icon("map"), " Mapa de Resultados"),
-          leafletOutput("osm_map", height = 420)
+          leafletOutput("osm_map", height = 680)
         ),
-        uiOutput("osm_ui")
+        div(
+          style = "overflow-y: auto; max-height: 730px;",
+          uiOutput("osm_ui")
+        )
       )
     )
   ),
@@ -1448,13 +1452,13 @@ server <- function(input, output, session) {
       if (length(log) > 0) {
         card(
           card_header(icon("terminal"), " Registro"),
-          tags$pre(style = "font-size:.8rem; max-height:120px; overflow-y:auto; margin:0;",
+          tags$pre(style = "font-size:.75rem; max-height:90px; overflow-y:auto; margin:0;",
                    paste(log, collapse = "\n"))
         )
       },
 
       layout_columns(
-        col_widths = c(4, 4, 4),
+        col_widths = c(6, 6),
         value_box(
           title = "Paradas OSM",
           value = if (has_stops) nrow(stops) else "—",
@@ -1466,29 +1470,20 @@ server <- function(input, output, session) {
           value = if (has_routes) nrow(routes) else "—",
           showcase = icon("route"),
           theme = if (has_routes) "primary" else "secondary"
-        ),
-        value_box(
-          title = "Bbox activa",
-          value = paste0(
-            round(input$bbox_ymin, 3), " / ",
-            round(input$bbox_ymax, 3)
-          ),
-          showcase = icon("crop"),
-          theme = "light"
         )
       ),
 
       if (has_stops) {
         card(
           card_header(icon("table"), " Paradas (", nrow(stops), ")"),
-          DTOutput("osm_stops_table", height = "260px")
+          DTOutput("osm_stops_table", height = "180px")
         )
       },
 
       if (has_routes) {
         card(
           card_header(icon("table"), " Rutas (", nrow(routes), ")"),
-          DTOutput("osm_routes_table", height = "260px")
+          DTOutput("osm_routes_table", height = "180px")
         )
       },
 
