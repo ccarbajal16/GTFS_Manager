@@ -225,14 +225,34 @@ ui <- page_navbar(
   bg = "#1a73e8",
   inverse = TRUE,
 
-  tags$head(tags$style(HTML("
-    .sidebar { border-right: 1px solid #dee2e6; }
-    .value-box .value-box-value { font-size: 1.8rem; }
-    .nav-tabs .nav-link { font-size: .9rem; }
-    .card-header { font-weight: 600; }
-    .placeholder-msg { color: #6c757d; text-align: center; padding: 60px 20px; }
-    .placeholder-msg .fa { font-size: 3rem; display: block; margin-bottom: 12px; opacity: .4; }
-  "))),
+  tags$head(
+    tags$style(HTML("
+      .sidebar { border-right: 1px solid #dee2e6; }
+      .value-box .value-box-value { font-size: 1.8rem; }
+      .nav-tabs .nav-link { font-size: .9rem; }
+      .card-header { font-weight: 600; }
+      .placeholder-msg { color: #6c757d; text-align: center; padding: 60px 20px; }
+      .placeholder-msg .fa { font-size: 3rem; display: block; margin-bottom: 12px; opacity: .4; }
+    ")),
+    tags$script(HTML("
+      $(document).ready(function() {
+        setTimeout(function() {
+          if (window.L && L.Map && L.Map.prototype.fitBounds) {
+            var _origFitBounds = L.Map.prototype.fitBounds;
+            L.Map.prototype.fitBounds = function(bounds, options) {
+              try {
+                var b = L.latLngBounds(bounds);
+                if (!b || !b.isValid()) return this;
+                return _origFitBounds.call(this, b, options);
+              } catch(e) {
+                return this;
+              }
+            };
+          }
+        }, 0);
+      });
+    "))
+  ),
 
   # ─────────────────────────────────────────────────────────────
   # TAB 1: ANÁLISIS
