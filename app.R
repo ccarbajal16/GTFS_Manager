@@ -1560,7 +1560,12 @@ server <- function(input, output, session) {
     proxy <- leafletProxy("osm_map") |> clearGroup("Rutas")
     routes <- osm_routes_rv()
     if (!is.null(routes) && nrow(routes) > 0) {
+      routes <- routes[!st_is_empty(routes), ]
+      if (nrow(routes) == 0) return()
+      # addPolylines requires LINESTRING; MULTILINESTRING causes "shapes.map is not a function"
+      routes <- tryCatch(st_cast(routes, "LINESTRING", warn = FALSE), error = function(e) routes)
       lbl <- if ("name" %in% names(routes)) routes$name else routes$osm_id
+      lbl[is.na(lbl)] <- "Sin nombre"
       proxy |> addPolylines(
         data = routes, color = "#e74c3c", weight = 2.5,
         opacity = 0.7, label = lbl, group = "Rutas"
