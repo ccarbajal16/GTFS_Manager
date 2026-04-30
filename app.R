@@ -69,6 +69,21 @@ generate_trips_stop_times <- function(stops_df, route_id, service_id,
   list(trips = bind_rows(trips_out), stop_times = bind_rows(st_out))
 }
 
+osm_routes_to_shapes <- function(routes_sf, route_id) {
+  routes_sf <- routes_sf[!st_is_empty(routes_sf), ]
+  if (nrow(routes_sf) == 0) return(NULL)
+  bind_rows(lapply(seq_len(nrow(routes_sf)), function(i) {
+    coords <- tryCatch(st_coordinates(routes_sf[i, ]), error = function(e) NULL)
+    if (is.null(coords) || nrow(coords) == 0) return(NULL)
+    tibble(
+      shape_id          = paste0(route_id, "_", i),
+      shape_pt_lat      = coords[, "Y"],
+      shape_pt_lon      = coords[, "X"],
+      shape_pt_sequence = seq_len(nrow(coords))
+    )
+  }))
+}
+
 build_and_zip_gtfs <- function(tables, output_zip) {
   tmp <- tempfile()
   dir.create(tmp, recursive = TRUE)
@@ -443,20 +458,32 @@ ui <- page_navbar(
 
         # ── Shapes / Rutas ───────────────────────────────────
         nav_panel("Shapes / Rutas", icon = icon("draw-polygon"),
-          card(card_header("Trazado de Rutas (shapes.txt)"), card_body(
-            fluidRow(
-              column(7,
-                fileInput("shapes_csv_upload", "Cargar shapes desde CSV/TXT",
-                          accept = c(".csv", ".txt"),
-                          buttonLabel = "Seleccionar archivo",
-                          placeholder = "shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence")),
-              column(5, div(class = "mt-4 pt-2",
-                downloadButton("dl_shapes_tpl", "Plantilla CSV",
-                               class = "btn-outline-secondary btn-sm w-100")))
+          layout_columns(
+            col_widths = c(3, 9),
+            div(
+              class = "p-1",
+              tags$p(class = "fw-bold text-primary mb-1 small", "RUTAS OSM"),
+              tags$p(class = "text-muted small mb-2",
+                     "Importa las rutas extraídas en la pestaña Extraer OSM."),
+              actionButton("btn_import_osm_shapes", "Importar desde OSM",
+                           icon  = icon("file-import"),
+                           class = "btn-primary w-100 mb-2"),
+              uiOutput("shapes_info_ui"),
+              uiOutput("dl_shapes_generated_ui"),
+              hr(),
+              tags$p(class = "fw-bold text-muted mb-1 small", "O CARGAR ARCHIVO"),
+              fileInput("shapes_csv_upload", NULL,
+                        accept      = c(".csv", ".txt"),
+                        buttonLabel = "CSV/TXT",
+                        placeholder = "shape_id, shape_pt_lat ..."),
+              downloadButton("dl_shapes_tpl", "Plantilla CSV",
+                             class = "btn-outline-secondary btn-sm w-100")
             ),
-            uiOutput("shapes_info_ui"),
-            leafletOutput("map_shapes", height = "460px")
-          ))
+            card(
+              card_header(icon("map"), " Mapa de Rutas"),
+              leafletOutput("map_shapes", height = 640)
+            )
+          )
         )
 
       ) # navset_card_tab
@@ -741,6 +768,7 @@ server <- function(input, output, session) {
   gtfs_zip_path       <- reactiveVal(NULL)
   generated_tables_rv <- reactiveVal(NULL)
   shapes_rv           <- reactiveVal(NULL)
+  shapes_generated    <- reactiveVal(FALSE)
 
   # Cargar paradas desde CSV
   observeEvent(input$stops_csv, {
@@ -820,12 +848,53 @@ server <- function(input, output, session) {
       shapes_rv(df %>%
         mutate(shape_pt_sequence = as.integer(shape_pt_sequence)) %>%
         arrange(shape_id, shape_pt_sequence))
+      shapes_generated(FALSE)
       showNotification(
         sprintf("%d puntos cargados (%d shapes / rutas)",
                 nrow(df), length(unique(df$shape_id))),
         type = "message")
     }, error = function(e) showNotification(paste("Error:", e$message), type = "error"))
   })
+
+  # Importar rutas OSM como shapes
+  observeEvent(input$btn_import_osm_shapes, {
+    routes <- osm_routes_rv()
+    if (is.null(routes) || nrow(routes) == 0) {
+      showNotification(
+        "No hay rutas OSM disponibles. Ve a 'Extraer OSM' y extrae rutas primero.",
+        type = "warning"
+      )
+      return()
+    }
+    sh <- osm_routes_to_shapes(routes, input$rt_id)
+    if (is.null(sh) || nrow(sh) == 0) {
+      showNotification("No se pudieron extraer coordenadas de las rutas OSM.",
+                       type = "error")
+      return()
+    }
+    shapes_rv(sh)
+    shapes_generated(TRUE)
+    showNotification(
+      sprintf("%d shapes importados · %d puntos totales",
+              length(unique(sh$shape_id)), nrow(sh)),
+      type = "message"
+    )
+  })
+
+  output$dl_shapes_generated_ui <- renderUI({
+    req(shapes_rv(), shapes_generated())
+    downloadButton("dl_shapes_generated", icon("download"), " shapes.txt",
+                   class = "btn-outline-success btn-sm w-100")
+  })
+
+  output$dl_shapes_generated <- downloadHandler(
+    filename = function()
+      paste0("shapes_", input$rt_id, "_", format(Sys.Date(), "%Y%m%d"), ".txt"),
+    content = function(f) {
+      req(shapes_rv())
+      write_csv(shapes_rv(), f, na = "")
+    }
+  )
 
   output$dl_shapes_tpl <- downloadHandler(
     filename = "plantilla_shapes.csv",
@@ -860,34 +929,22 @@ server <- function(input, output, session) {
     m <- leaflet() %>% addProviderTiles("CartoDB.Positron")
 
     if (!is.null(shapes) && nrow(shapes) > 0) {
-      ids            <- unique(shapes$shape_id)
-      pts_per_shape  <- tabulate(match(shapes$shape_id, ids))
-
-      if (all(pts_per_shape == 1L)) {
-        # Every row has a unique shape_id (point-per-row format):
-        # connect ALL points as one polyline ordered by shape_pt_sequence
-        pts <- shapes[order(shapes$shape_pt_sequence), ]
+      ids <- unique(shapes$shape_id)
+      for (i in seq_along(ids)) {
+        pts <- shapes[shapes$shape_id == ids[i], ]
+        pts <- pts[order(pts$shape_pt_sequence), ]
+        if (nrow(pts) < 2L) next
+        color <- pal_colors[((i - 1L) %% length(pal_colors)) + 1L]
         m <- m %>% addPolylines(
-          lng     = pts$shape_pt_lon,
-          lat     = pts$shape_pt_lat,
-          color   = pal_colors[1], weight = 4, opacity = 0.85,
-          label   = paste(nrow(pts), "puntos"), group = "Shapes"
+          lng = pts$shape_pt_lon, lat = pts$shape_pt_lat,
+          color = color, weight = 3.5, opacity = 0.85,
+          label = ids[i], group = "Shapes"
         )
-      } else {
-        # Standard GTFS: group by shape_id, draw one polyline per shape
-        for (i in seq_along(ids)) {
-          pts <- shapes[shapes$shape_id == ids[i], ]
-          pts <- pts[order(pts$shape_pt_sequence), ]
-          if (nrow(pts) < 2L) next
-          color <- pal_colors[((i - 1L) %% length(pal_colors)) + 1L]
-          m <- m %>% addPolylines(
-            lng     = pts$shape_pt_lon,
-            lat     = pts$shape_pt_lat,
-            color   = color, weight = 4, opacity = 0.85,
-            label   = ids[i], group = "Shapes"
-          )
-        }
       }
+      m <- m %>% fitBounds(
+        lng1 = min(shapes$shape_pt_lon), lat1 = min(shapes$shape_pt_lat),
+        lng2 = max(shapes$shape_pt_lon), lat2 = max(shapes$shape_pt_lat)
+      )
     }
 
     if (!is.null(stops) && nrow(stops) > 0) {
@@ -1008,8 +1065,16 @@ server <- function(input, output, session) {
         )
       }
 
-      if (!is.null(shapes_rv()) && nrow(shapes_rv()) > 0)
+      if (!is.null(shapes_rv()) && nrow(shapes_rv()) > 0) {
         tables$shapes <- shapes_rv()
+        if (isTRUE(shapes_generated())) {
+          sh_ids <- unique(shapes_rv()$shape_id)
+          ida_id <- sh_ids[1]
+          vta_id <- if (length(sh_ids) >= 2L) sh_ids[2] else sh_ids[1]
+          tables$trips <- tables$trips |>
+            mutate(shape_id = ifelse(direction_id == 0L, ida_id, vta_id))
+        }
+      }
 
       tmp <- tempfile(fileext = ".zip")
       build_and_zip_gtfs(tables, tmp)
