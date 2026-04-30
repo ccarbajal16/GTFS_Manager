@@ -66,7 +66,7 @@ install.packages(c(
 
 The app is deployed and available on Posit Cloud:
 
-**[https://019da23e-461a-53da-8670-96031dc3a120.share.connect.posit.cloud/](https://019da23e-461a-53da-8670-96031dc3a120.share.connect.posit.cloud/)**
+**[https://019ddfff-261d-12f9-9cd2-ba185dee0b1f.share.connect.posit.cloud/](https://019ddfff-261d-12f9-9cd2-ba185dee0b1f.share.connect.posit.cloud/)**
 
 ## Running the App Locally
 
